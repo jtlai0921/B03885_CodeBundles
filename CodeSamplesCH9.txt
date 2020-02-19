@@ -1,0 +1,395 @@
+#Check if user/Group/Computer/OU account exists
+function Test-ADObject {
+[CmdletBinding()]
+Param(
+	[Parameter(Mandatory=$true,Position=0)]
+	[string[]]$Name,
+	[Parameter(Mandatory=$true,Position=1)]
+	[ValidateSet("User","Group","Computer","organizationalUnit")]
+	[string]$Type
+)
+
+foreach($ObjName in $Name) {
+	$OutputObj = New-Object -TypeName PSObject -Property @{
+        Name = $ObjName;
+        IsFound = $null;
+        ObjectClass = $Type }
+
+	try {
+		$ObjOut = @(Get-ADObject -Filter { Name -eq $ObjName -and ObjectClass -eq $Type } -EA Stop)
+		if($ObjOut.count -eq 0) {
+			$OutputObj.IsFound = $false
+		}
+
+		if($ObjOut.Count -gt 1) {
+			$OutputObj.IsFound = $false
+			Write-Verbose "Multiple objects found with the name $ObjName"
+		}
+
+		if($ObjOut.Count -eq 1) {
+			$OutputObj.IsFound = $true
+		}
+	} catch {
+		$OutputObj.IsFound = $false
+	}
+	$OutputObj | select Name, ObjectClass, IsFound
+}
+}
+
+#Get Membership of a User/Computer/Group
+Function Get-ADobjectMembership {
+[CmdletBinding()]
+param(
+	[Parameter(Mandatory=$true,Position=0)]
+	[string[]]$Name,
+	[Parameter(Mandatory=$true,Position=1)]
+	[ValidateSet("User","Group","Computer")]
+	[string]$Type
+)
+
+Foreach($ObjName in $Name) {
+    try {
+        $MemberOf = @(Get-ADObject -Filter { Name -eq $ObjName -and ObjectClass -eq $Type} -Properties MemberOf -EA Stop | select -ExpandProperty MemberOf)
+        if(!$MemberOf) {
+            Write-Warning "$ObjName is not member of any Groups"
+            Continue
+        }
+        foreach($Group in $MemberOf) {
+            $OutputObj = New-Object -TypeName PSObject -Property @{
+                    Name = $ObjName;
+                    MemberOf = $null
+                }
+            $GroupName = (Get-ADGroup -Identity $Group -EA Stop).Name
+            $OutputObj.MemberOf = $GroupName
+            $OutputObj
+        }
+
+
+
+    } catch {
+        Write-Warning "Failed to query Membership of $ObjName. $_"
+        Continue
+    }
+
+}
+
+}
+
+#Reset Password of multiple Users
+function Reset-ADuserPassword {
+[CmdletBinding()]
+Param(
+    [string[]]$UserName
+)
+
+$Password = Read-Host "Enter the password that you want to set for the users" -AsSecureString
+
+foreach($User in $UserName) {
+    try {
+        Set-ADAccountPassword -Identity $User -Reset -NewPassword $Password -EA Stop
+        Write-Host "Password successfully changed for $user"
+    } catch {
+        Write-Warning "Failed to reset password for $user. $_"
+    }
+}
+
+}
+
+#Get password expiry date of User accounts
+Function Get-PasswordExpiryDetails {
+[CmdletBinding()]
+Param(
+)
+
+$Users = Get-ADUser -Filter {PasswordNeverExpires -eq $false -and Enabled -eq $true} `
+					-Properties msDS-UserPasswordExpiryTimeComputed,*
+
+Foreach($User in $Users) {
+	$OutputObj = New-Object -TypeName PSObject -Property @{
+					UserName = $User.Name;
+					DisplayName = $null;
+					PwdExpirtyDate = $null;
+					PwdExpiryInDays = $Null
+				}
+	$ExpiryDate = [DateTime]::FromFileTime($User."msDS-UserPasswordExpiryTimeComputed")
+	$ExpirtyInDays = ($ExpiryDate - (Get-Date)).Days
+	$OutputObj.DisplayName = $User.DisplayName
+	$OutputObj.PwdExpirtyDate = $ExpiryDate
+	$OutputObj.PwdExpiryInDays = $ExpirtyInDays
+	$OutputObj
+}
+}
+
+#Find all disabled user accounts
+Function Find-DisabledUsers {
+[CmdletBinding()]
+param(
+)
+
+$OutputFilePath = "c:\temp\Disabled-Uses.csv"
+Add-Content -Path $OutputFilePath -Value "UserName, DisplayName, DistinguishedName"
+
+$DisabledUsers = Get-ADUser -Filter { Enabled -eq $false } -Properties DisplayName
+foreach($User in $disabledUsers) {
+
+Add-Content -Path $OutputFilePath -Value ("{0},{1},'{2}'" -f $User.Name, $User.DisplayName, $User.DistinguishedName)
+
+}
+
+}
+
+#Get All Domain Controllers in Forest and their Site names
+Function Get-DCDetails {
+[CmdletBinding()]
+Param(
+)
+$Domains = (Get-ADForest).Domains
+$DCs = $Domains | % { Get-ADDomainController -Filter * -Server $_ }
+foreach($DC in $DCs) {
+	$OutputObj = New-Object -TypeName PSObject -Property @{
+					DCName = $User.Name;
+					DCDomain = $null;
+					IsGC = $null;
+					SiteName = $Null;
+					IsOnline = $null
+				}
+	if(Test-Connection -Computer $DC -Count 1 -quiet) {
+		$OutputObj.IsOnline = $true
+	} else {
+		$OutputObj.IsOnline = $false
+	}
+	
+	$OutputObj.DCName = $DC.HostName
+	$OutputObj.DCDomain = $DC.Domain
+	$OutputObj.IsGC = $DC.IsGlobalCatalog
+	$OutputObj.SiteName = $DC.Site
+	$OutputObj
+
+}
+}
+
+#Move objects from one OU to another
+function Move-ObjectsToOU {
+[CmdletBinding()]
+param(
+	[Parameter(Mandatory=$true,Position=0)]
+	[string[]]$Name,
+	[Parameter(Mandatory=$true,Position=1)]
+	[ValidateSet("User","Group","Computer")]
+	[string]$Type,
+	[Parameter(Mandatory=$true,Position=2)]
+	[string]$TargetOUPath
+)
+
+if([ADSI]::Exists("LDAP://{0}" -f $TargetOUPath)) {
+Foreach($ObjectName in $Name) {
+	try {
+		$Object = Get-ADObject -Filter { Name -eq $ObjectName -and ObjectClass -eq $Type } -EA Stop
+		Move-ADObject -Identity $Object -TargetPath $TargetOUPath -EA Stop
+		Write-Host "$ObjectName : Moved successfully to target OU"
+	} catch {
+		Write-Warning "Cannot move $ObjectName"			
+	}
+
+}
+} else {
+	Write-Warning "The target OU not found. Script exiting"
+}
+}
+
+#Find Inactive Computers in Active Directory
+Function Find-InactiveComputers {
+[CmdletBinding()]
+Param(
+	[int]$DaysOlderThan
+)
+$older = (Get-Date).AddDays(-$DaysOlderThan)
+Get-ADComputer -Filter { PasswordLastSet -lt $older } | select Name, DistinguishedName
+}
+
+#Bulk creation of Groups
+Function Invoke-ADBulkGroup {
+[CmdletBinding()]
+Param(
+	[Parameter(Mandatory=$true, Position = 0)]
+	[String[]]$GroupName,
+	[Parameter(Mandatory=$true, Position = 1)]
+	[ValidateSet("DomainLocal","Global","Universal")]
+	[string]$GroupScope
+)
+
+#Change the value of $TargetOU variable to the DN of the path where you want the groups to be created
+#If you leave it, it will create in default users container.
+$TargetOU = (Get-ADDomain).UsersContainer
+#$TargetOU = "OU=Prod1,DC=techibee,DC=ad"
+
+if(!([ADSI]::Exists("LDAP://$TargetOU"))) {
+	Write-Warning "The given OU $TargetOU not found. Exiting"
+	return
+}
+
+Foreach($Group in $GroupName) {
+try {
+	$GroupObj = Get-ADGroup -Identity $Group -EA Stop
+	if($GroupObj) {
+		Write-Warning "$Group : Group already exists. Cannot create another with same name"
+		Continue
+	}
+} catch {
+	try {
+		New-ADGroup -Name $Group -GroupScope $GroupScope -EA Stop
+		Write-Host "$Group : Successfully Created"
+	} catch {
+		Write-Warning "$Group : An error occurred during creation"
+	}
+}
+}
+}
+
+#Export AD Group member details to CSV
+Function Export-ADGroupMembers {
+[CmdletBinding()]
+Param(
+	[Parameter(Mandatory=$true)]
+	[String[]]$GroupName,
+	[Switch]$Nested
+)
+$MemArray = @()
+foreach($Group in $GroupName) {
+	try {
+		$GroupMem = @(Get-ADGroupMember -Identity $Group -Recursive:$Nested -EA Stop)
+		if(!$GroupMem) {
+			Write-Warning "$Group has no members"
+			Continue
+		}
+		foreach($Mem in $GroupMem) {
+			$Mem = $Mem |select name,  SamAccountName, objectClass 
+			$Mem | Add-Member -MemberType NoteProperty -Name GroupName -Value $Group
+			$MemArray += $Mem
+		}
+	} catch {
+		Write-Warning "Error occurred while querying $Group"	
+	}
+}
+
+$MemArray | select GroupName, name,  SamAccountName, objectClass  | Export-CSV c:\temp\GroupMembeship.csv -NotypeInformation
+Write-Host "Output available at c:\temp\GroupMembeship.Csv"
+}
+
+#Find empty groups in Active Directory
+Function Find-EmptyADGroups {
+[CmdletBinding()]
+Param(
+	[switch]$Nested
+)
+
+$Groups = Get-ADGroup -Filter *
+Write-Host "`nBelow is the list of empty groups in Active Directory`n`n"
+$Count = 0
+foreach($Group in $Groups) {
+	$Members = Get-ADGroupMember -Identity $Group -Recursive:$Nested
+	if(!$Members) {
+		$Group | select Name, DistinguishedName
+		$Count++
+	}
+}
+Write-Host "`n`n`nTotal no. of empty groups are : $Count`n`n`n"
+}
+
+#Verify if User is member of given group or not
+Function Test-IsGroupMember {
+[CmdletBinding()]
+param(
+	[Parameter(Mandatory=$true,Position=0)]
+	[string[]]$UserName,
+	[Parameter(Mandatory=$true,Position=1)]
+	[string]$GroupName
+)
+
+$GroupMembers = Get-ADGroupMember -Identity $GroupName -Recursive | ? {$_.objectClass -eq "User" }
+if(!$GroupMembers) {
+	Write-Warning "$GroupName : Group is not having any User accounts as members"
+}
+
+foreach($User in $UserName) {
+$OutputObj = New-Object -TypeName PSObject -Property @{
+				UserName = $User;
+				GroupName = $GroupName;
+				IsMember = $False
+			}
+foreach($Member in $GroupMembers) {
+	if($User -eq $Member.Name) {
+		$OutputObj.IsMember = $True
+	}
+}
+$OutputObj
+}
+}
+
+#Compare AD Group membership
+Function Compare-ADGroups {
+[CmdletBinding()]
+Param(
+	[Parameter(Mandatory=$true, Position = 0)]
+	[String]$Group1,
+	[Parameter(Mandatory=$true, Position = 1)]
+	[String]$Group2,
+	[Parameter(Position = 2)]
+	[switch]$Nested
+)
+
+try {
+	$Group1Obj = @(Get-ADGroupMember -Identity $Group1 -Recursive:$Nested -EA Stop)
+	$Group2Obj = @(Get-ADGroupMember -Identity $Group2 -Recursive:$Nested -EA Stop)
+	
+	} catch {
+		Write-Warning "Failed to query group members."
+		return
+	}
+	if(!$Group1Obj) {
+		Write-Warning "$Group1 is empty. Nothing to Compare"
+		Continue
+	}
+	
+	if(!$Group2Obj) {
+		Write-Warning "$Group2 is empty. Nothing to Compare"
+		Continue
+	}
+	
+	$DiffObj = Compare-Object -ReferenceObject $Group1Obj `
+								-DifferenceObject $Group2Obj `
+								-IncludeEqual
+	$CommonObj = @()
+	$FoundIn1 = @()
+	$FoundIn2 = @()
+	
+	foreach($Obj in $DiffObj) {
+		if($Obj.SideIndicator -eq "==") {
+			$CommonObj +=$Obj
+		}
+		
+		if($Obj.SideIndicator -eq "=>") {
+			$FoundIn2 +=$Obj
+		}
+		
+		if($Obj.SideIndicator -eq "<=") {
+			$FoundIn1 +=$Obj
+		}	
+	}
+	
+	Write-host "Members found in both the Groups : $($CommonObj.count)"
+	Write-host ""
+	$CommonObj.InputObject | select Name,ObjectClass	
+	Write-host ""
+	Write-host "Members found in $Group1 but not in $Group2  : $($FoundIn1.count)"
+	Write-host ""
+	$FoundIn1.InputObject | select Name,ObjectClass
+	Write-host ""
+	Write-host "Members found in $Group2 but not in $Group1  : $($FoundIn2.count)"
+	Write-host ""
+	$FoundIn2.InputObject | select Name,ObjectClass
+	Write-host ""
+
+
+}
+

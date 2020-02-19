@@ -1,0 +1,2 @@
+Name,SAMAccountName,GivenName,LastName,Email,Address,City,Country,State,Company,EmployeeID,OUName
+pamarths,pamarths,Sitaram,Pamarthi,Sitaram.Pamarthi@techibee.ad,"Steet1, Road 21",Hyderabad,US,AP,TechiBee,1234,"ou=Prod,dc=techibee,dc=ad"
